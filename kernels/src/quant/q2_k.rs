@@ -38,13 +38,21 @@ fn unpack(blk: &[u8], qv: &mut [i8; 256]) {
 
 /// One block against one vector: the scale-weighted sum of the value dots, and the sums of the activations over the
 /// groups weighted by the group minima. With a single vector nothing is shared, so this is the whole of reading the
-/// block; on x86-64 it unpacks by the run and uses the shared dots, elsewhere it takes the codes straight from the
-/// block, which needs no buffer for a block one vector sees once.
+/// block; where there is a vector unpack it uses that and the shared dots, elsewhere it takes the codes straight from
+/// the block, which needs no buffer for a block one vector sees once.
+///
+/// AArch64 takes the unpacked form, as in q2_0.rs. The reading below happens to be vectorisable - the shift is fixed
+/// for a group, so a lane group can take it - and it still runs at 9.4 GMAC/s against 16.2 at sixteen vectors: it
+/// re-reads and re-shifts the block for every vector rather than once, and it keeps the values out of the shape the
+/// shared dots want.
 #[inline(always)]
 fn ints_from_block(blk: &[u8], xa: &BlockQ8K) -> (i32, i32) {
     let sc = &blk[0..16];
     let (mut sumi, mut summs) = (0i32, 0i32);
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c"))]
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c"),
+        target_arch = "aarch64"
+    ))]
     {
         let mut qv = [0i8; 256];
         unpack(blk, &mut qv);
@@ -53,7 +61,10 @@ fn ints_from_block(blk: &[u8], xa: &BlockQ8K) -> (i32, i32) {
             summs += xa.bsums[g] as i32 * (sc[g] >> 4) as i32;
         }
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c")))]
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma", target_feature = "f16c"),
+        target_arch = "aarch64"
+    )))]
     for g in 0..16 {
         let (chunk, half, shift) = (32 * (g / 8), 16 * (g % 2), 2 * ((g % 8) / 2));
         let mut isuml = 0i32;
